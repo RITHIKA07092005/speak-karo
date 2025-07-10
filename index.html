@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Speak Karo - AI GD, Personal Tutor & Video</title>
+  <style>
+    body { margin: 0; font-family: sans-serif; background: #f0f0f0; text-align: center; }
+    video { width: 300px; height: 200px; border: 2px solid #333; margin: 10px; cursor: pointer; }
+    input, button { padding: 10px; font-size: 16px; }
+    #inviteBox { margin: 20px; }
+
+    .videoWrapper {
+      position: relative;
+      width: 300px;
+      height: 200px;
+      margin: 10px auto;
+    }
+
+    #controlBar {
+      position: absolute;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 15px;
+      background: rgba(0, 0, 0, 0.6);
+      padding: 8px 16px;
+      border-radius: 30px;
+      z-index: 10;
+    }
+
+    .controlBtn {
+      width: 40px;
+      height: 40px;
+      background: white;
+      border-radius: 50%;
+      border: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      padding: 6px;
+    }
+
+    .controlBtn img {
+      width: 24px;
+      height: 24px;
+    }
+  </style>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+</head>
+<body>
+  <h1>Speak Karo - AI Tutor, GD Manager & Live Video GD</h1>
+
+  <!-- Invite Link -->
+  <div id="inviteBox">
+    <p>Invite friends by sharing this link:</p>
+    <input id="inviteLink" readonly>
+    <button onclick="copyLink()">Copy Link</button>
+  </div>
+
+  <!-- Personal AI Tutor -->
+  <h2>Personal AI Tutor</h2>
+  <button id="recordBtn"></button>
+  <p id="status"></p>
+  <pre id="response"></pre>
+
+  <!-- GD Manager -->
+  <h2>AI GD Manager</h2>
+  <button onclick="startGD()">Start GD (Moderator Only)</button>
+  <h3 id="gdTopic"></h3>
+
+  <!-- Video Area -->
+  <h2>Live Video Group Discussion</h2>
+  <div id="videos">
+    <div class="videoWrapper">
+      <video id="localVideo" autoplay muted playsinline></video>
+      <div id="controlBar">
+        <button class="controlBtn" onclick="toggleVideo()" title="Toggle Video">
+          <img id="videoIcon" src="https://cdn-icons-png.flaticon.com/128/711/711245.png" alt="Video On">
+        </button>
+        <button class="controlBtn" onclick="toggleAudio()" title="Toggle Audio">
+          <img id="audioIcon" src="https://cdn-icons-png.flaticon.com/128/9755/9755179.png" alt="Audio On">
+        </button>
+      </div>
+    </div>
+  </div>
+  <div id="remoteVideos"></div>
+
+  <script>
+    const socket = io();
+    let roomId = new URLSearchParams(window.location.search).get('room');
+    if (!roomId) {
+      roomId = Math.random().toString(36).substring(2, 8);
+      window.history.replaceState({}, '', `?room=${roomId}`);
+    }
+    document.getElementById('inviteLink').value = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
+
+    function copyLink() {
+      navigator.clipboard.writeText(document.getElementById('inviteLink').value);
+      alert("Link copied! Share it with your friends.");
+    }
+
+    // Personal AI Tutor
+    let mediaRecorder, audioChunks = [], isRecording = false;
+    const recordBtn = document.getElementById('recordBtn');
+    const status = document.getElementById('status');
+
+    recordBtn.onclick = async () => {
+      if (!isRecording) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          mediaRecorder = new MediaRecorder(stream);
+          audioChunks = [];
+          mediaRecorder.start();
+          isRecording = true;
+          recordBtn.textContent = "Stop Recording";
+          status.textContent = "Recording... Speak now!";
+          mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+          mediaRecorder.onstop = () => {
+            status.textContent = "Recording stopped. Uploading...";
+            const audioBlob = new Blob(audioChunks);
+            const formData = new FormData();
+            formData.append('audio', audioBlob, 'speech.wav');
+            fetch('/upload', { method: 'POST', body: formData })
+              .then(response => response.json())
+              .then(data => {
+                status.textContent = "Feedback received!";
+                document.getElementById('response').textContent = JSON.stringify(data, null, 2);
+              })
+              .catch(err => { status.textContent = "Error: " + err; });
+          };
+        } catch (err) {
+          status.textContent = "Error accessing microphone: " + err;
+        }
+      } else {
+        mediaRecorder.stop();
+        isRecording = false;
+        recordBtn.textContent = "Start Recording";
+      }
+    };
+
+    // GD Manager
+    socket.on('gdTopic', topic => {
+      document.getElementById('gdTopic').innerText = `GD Topic: ${topic}`;
+      speakIntro(topic);
+    });
+
+    function speakIntro(topic) {
+      const intro = `Welcome everyone to the group discussion. Today's topic is: ${topic}. Please begin your discussion now.`;
+      const utterance = new SpeechSynthesisUtterance(intro);
+      utterance.lang = 'en-US';
+      utterance.rate = 1;
+      utterance.pitch = 1;
+      speechSynthesis.speak(utterance);
+    }
+
+    function startGD() {
+      socket.emit('startGD');
+    }
+
+    // WebRTC Video Logic
+    const peers = {};
+    const localVideo = document.getElementById('localVideo');
+    let localStream;
+
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
+      localVideo.srcObject = stream;
+      localStream = stream;
+      socket.emit("join-room", roomId);
+    });
+
+    socket.on("user-joined", id => {
+      const pc = createPeerConnection(id);
+      peers[id] = pc;
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+      pc.createOffer().then(offer => {
+        pc.setLocalDescription(offer);
+        socket.emit("offer", { to: id, offer });
+      });
+    });
+
+    socket.on("offer", ({ from, offer }) => {
+      const pc = createPeerConnection(from);
+      peers[from] = pc;
+      pc.setRemoteDescription(new RTCSessionDescription(offer));
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+      pc.createAnswer().then(answer => {
+        pc.setLocalDescription(answer);
+        socket.emit("answer", { to: from, answer });
+      });
+    });
+
+    socket.on("answer", ({ from, answer }) => {
+      peers[from].setRemoteDescription(new RTCSessionDescription(answer));
+    });
+
+    socket.on("ice-candidate", ({ from, candidate }) => {
+      if (peers[from]) peers[from].addIceCandidate(new RTCIceCandidate(candidate));
+    });
+
+    function createPeerConnection(peerId) {
+      const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+      pc.onicecandidate = e => {
+        if (e.candidate) socket.emit("ice-candidate", { to: peerId, candidate: e.candidate });
+      };
+      pc.ontrack = e => {
+        let video = document.getElementById(`video-${peerId}`);
+        if (!video) {
+          video = document.createElement("video");
+          video.id = `video-${peerId}`;
+          video.autoplay = true;
+          video.playsinline = true;
+          video.width = 300;
+          video.height = 200;
+          video.style.border = "2px solid #333";
+          video.style.margin = "10px";
+          document.getElementById("remoteVideos").appendChild(video);
+        }
+        video.srcObject = e.streams[0];
+      };
+      return pc;
+    }
+
+    // Toggle Video/Audio
+    function toggleVideo() {
+      if (!localStream) return;
+      const videoTrack = localStream.getVideoTracks()[0];
+      videoTrack.enabled = !videoTrack.enabled;
+      document.getElementById('videoIcon').src = videoTrack.enabled
+        ? "https://cdn-icons-png.flaticon.com/128/711/711245.png"
+        : "https://cdn-icons-png.flaticon.com/128/5107/5107435.png";
+    }
+
+    function toggleAudio() {
+      if (!localStream) return;
+      const audioTrack = localStream.getAudioTracks()[0];
+      audioTrack.enabled = !audioTrack.enabled;
+      document.getElementById('audioIcon').src = audioTrack.enabled
+        ? "https://cdn-icons-png.flaticon.com/128/9755/9755179.png"
+        : "https://cdn-icons-png.flaticon.com/128/11340/11340120.png";
+    }
+
+    localVideo.addEventListener('dblclick', () => {
+      if (document.fullscreenElement) {
+        document.exitFullscreen();
+      } else {
+        localVideo.requestFullscreen().catch(err => console.error("Fullscreen error:", err));
+      }
+    });
+  </script>
+</body>
+</html>
